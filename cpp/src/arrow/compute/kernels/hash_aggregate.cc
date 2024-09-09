@@ -835,6 +835,143 @@ static constexpr const char kMeanName[] = "mean";
 using GroupedMeanFactory =
     GroupedReducingFactory<GroupedMeanImpl, kMeanName, GroupedMeanNullImpl>;
 
+
+// ----------------------------------------------------------------------
+// Mean-partial implementation
+
+template <typename Type>
+struct GroupedMeanPartialImpl
+    : public GroupedReducingAggregator<Type, GroupedMeanPartialImpl<Type>,
+                                       typename GroupedMeanAccType<Type>::Type> {
+  using Base = GroupedReducingAggregator<Type, GroupedMeanPartialImpl<Type>,
+                                         typename GroupedMeanAccType<Type>::Type>;
+  using CType = typename Base::CType;
+  using InputCType = typename Base::InputCType;
+  using MeanType =
+      typename std::conditional<is_decimal_type<Type>::value, CType, double>::type;
+
+  static CType NullValue(const DataType&) { return CType(0); }
+
+  template <typename T = Type>
+  static enable_if_number<T, CType> Reduce(const DataType&, const CType u,
+                                           const InputCType v) {
+    return static_cast<CType>(u) + static_cast<CType>(v);
+  }
+
+  static CType Reduce(const DataType&, const CType u, const CType v) {
+    return static_cast<CType>(to_unsigned(u) + to_unsigned(v));
+  }
+
+  template <typename T = Type>
+  static enable_if_decimal<T, Result<MeanType>> DoMean(CType reduced, int64_t count) {
+    static_assert(std::is_same<MeanType, CType>::value, "");
+    CType quotient, remainder;
+    ARROW_ASSIGN_OR_RAISE(std::tie(quotient, remainder), reduced.Divide(count));
+    // Round the decimal result based on the remainder
+    remainder.Abs();
+    if (remainder * 2 >= count) {
+      if (reduced >= 0) {
+        quotient += 1;
+      } else {
+        quotient -= 1;
+      }
+    }
+    return quotient;
+  }
+
+  template <typename T = Type>
+  static enable_if_t<!is_decimal_type<T>::value, Result<MeanType>> DoMean(CType reduced,
+                                                                          int64_t count) {
+    return static_cast<MeanType>(reduced) / count;
+  }
+  
+  static Result<std::shared_ptr<Buffer>> Finish(MemoryPool* pool,
+                                                const ScalarAggregateOptions& options,
+                                                const int64_t* counts,
+                                                TypedBufferBuilder<CType>* reduced_,
+                                                int64_t num_groups, int64_t* null_count,
+                                                std::shared_ptr<Buffer>* null_bitmap) {
+    const CType* reduced = reduced_->data();
+    ARROW_ASSIGN_OR_RAISE(std::shared_ptr<Buffer> values,
+                          AllocateBuffer(num_groups * sizeof(MeanType), pool));
+    auto* means = values->mutable_data_as<MeanType>();
+    for (int64_t i = 0; i < num_groups; ++i) {
+      if (counts[i] >= options.min_count) {
+        ARROW_ASSIGN_OR_RAISE(means[i], DoMean(reduced[i], counts[i]));
+        continue;
+      }
+      means[i] = MeanType(0);
+
+      if ((*null_bitmap) == nullptr) {
+        ARROW_ASSIGN_OR_RAISE(*null_bitmap, AllocateBitmap(num_groups, pool));
+        bit_util::SetBitsTo((*null_bitmap)->mutable_data(), 0, num_groups, true);
+      }
+
+      (*null_count)++;
+      bit_util::SetBitTo((*null_bitmap)->mutable_data(), i, false);
+    }
+    return values;
+  }
+  
+
+  Result<Datum> Finalize() override {
+    std::shared_ptr<Buffer> null_bitmap = nullptr;
+    const int64_t* counts = Base::counts_.data();
+    int64_t null_count = 0;
+
+    ARROW_ASSIGN_OR_RAISE(auto values,
+                          Finish(Base::pool_, Base::options_, counts, &(Base::reduced_), Base::num_groups_,
+                                       &null_count, &null_bitmap));
+
+    if (!Base::options_.skip_nulls) {
+      null_count = kUnknownNullCount;
+      if (null_bitmap) {
+        arrow::internal::BitmapAnd(null_bitmap->data(), /*left_offset=*/0,
+                                   Base::no_nulls_.data(), /*right_offset=*/0, Base::num_groups_,
+                                   /*out_offset=*/0, null_bitmap->mutable_data());
+      } else {
+        ARROW_ASSIGN_OR_RAISE(null_bitmap, Base::no_nulls_.Finish());
+      }
+    }
+
+    auto means = ArrayData::Make(Base::out_type(), Base::num_groups_, {null_bitmap, nullptr});
+    auto counts_arr = ArrayData::Make(int64(), Base::num_groups_, {std::move(null_bitmap), nullptr});
+    
+    means->buffers[1] = std::move(values);
+    ARROW_ASSIGN_OR_RAISE(counts_arr->buffers[1], Base::counts_.Finish());
+
+
+
+    return ArrayData::Make(out_type(), Base::num_groups_, {nullptr},
+                           {std::move(means), std::move(counts_arr)});
+  }
+  
+  std::shared_ptr<DataType> out_type() const override {
+    std::shared_ptr<DataType> avg_type = float64();
+    if (is_decimal_type<Type>::value) avg_type =  this->out_type_;
+
+    return struct_({field("avg", avg_type), field("count", int64())});
+  }
+
+
+};
+
+struct GroupedMeanPartialNullImpl final : public GroupedNullImpl {
+  
+  std::shared_ptr<DataType> out_type() const override { 
+    return struct_({field("avg", float64()), field("count", int64())}); 
+  }
+
+  void output_empty(const std::shared_ptr<Buffer>& data) override {
+    //todo
+    std::fill_n(data->mutable_data_as<double>(), num_groups_, 0);
+  }
+};
+
+static constexpr const char kMeanPartialName[] = "mean-partial";
+using GroupedMeanPartialFactory =
+    GroupedReducingFactory<GroupedMeanPartialImpl, kMeanPartialName, GroupedMeanPartialNullImpl>;
+
 // Variance/Stdev implementation
 
 using arrow::internal::int128_t;
@@ -3336,6 +3473,14 @@ const FunctionDoc hash_mean_doc{
     {"array", "group_id_array"},
     "ScalarAggregateOptions"};
 
+const FunctionDoc hash_mean_partial_doc{
+    "Compute the mean of values in each group, for partial phase",
+    ("Null values are ignored.\n"
+     "For integers and floats, NaN is returned if min_count = 0 and\n"
+     "there are no values. For decimals, null is returned instead."),
+    {"array", "group_id_array"},
+    "ScalarAggregateOptions"};
+
 const FunctionDoc hash_stddev_doc{
     "Compute the standard deviation of values in each group",
     ("The number of degrees of freedom can be controlled using VarianceOptions.\n"
@@ -3510,6 +3655,22 @@ void RegisterHashAggregateBasic(FunctionRegistry* registry) {
     DCHECK_OK(AddHashAggKernels({decimal128(1, 1), decimal256(1, 1)},
                                 GroupedMeanFactory::Make, func.get()));
     DCHECK_OK(AddHashAggKernels({null()}, GroupedMeanFactory::Make, func.get()));
+    DCHECK_OK(registry->AddFunction(std::move(func)));
+  }
+
+  {
+    auto func = std::make_shared<HashAggregateFunction>(
+        "hash_mean_partial", Arity::Binary(), hash_mean_partial_doc, &default_scalar_aggregate_options);
+    DCHECK_OK(AddHashAggKernels({boolean()}, GroupedMeanPartialFactory::Make, func.get()));
+    DCHECK_OK(AddHashAggKernels(SignedIntTypes(), GroupedMeanPartialFactory::Make, func.get()));
+    DCHECK_OK(
+        AddHashAggKernels(UnsignedIntTypes(), GroupedMeanPartialFactory::Make, func.get()));
+    DCHECK_OK(
+        AddHashAggKernels(FloatingPointTypes(), GroupedMeanPartialFactory::Make, func.get()));
+    // Type parameters are ignored
+    DCHECK_OK(AddHashAggKernels({decimal128(1, 1), decimal256(1, 1)},
+                                GroupedMeanPartialFactory::Make, func.get()));
+    DCHECK_OK(AddHashAggKernels({null()}, GroupedMeanPartialFactory::Make, func.get()));
     DCHECK_OK(registry->AddFunction(std::move(func)));
   }
 

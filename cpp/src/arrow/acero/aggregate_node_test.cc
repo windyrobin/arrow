@@ -73,6 +73,30 @@ TEST(GroupByConvenienceFunc, Basic) {
                                     {"key1"}));
   AssertTablesEqual(*expected, *actual);
 
+
+  // One key, two aggregates, do ave 
+  expected = TableFromJSON(schema({
+                                                      field("key1", utf8()),
+                                                      field("key2_avg", struct_({
+                                                          {"avg", float64()}, {"count", int64()}
+                                                          })),
+                                                      field("value_avg", struct_({
+                                                        {"avg", float64()}, {"count", int64()}
+                                                      }))
+                                                  }),
+                                                  {R"([
+        ["x", [1.0, 1], [1.0, 1]],
+        ["y", [1.5, 2], [2.5, 2]],
+        ["z", [2.0, 2], [4.5, 2]]
+    ])"});
+  ASSERT_OK_AND_ASSIGN(actual,
+                       TableGroupBy(in_table,
+                                    {{"hash_mean_partial", {"key2"}, "key2_avg"},
+                                     {"hash_mean_partial", {"value"}, "value_avg"}},
+                                    {"key1"}));
+  AssertTablesEqual(*expected, *actual);
+
+
   // Two keys, one aggregate
   expected = TableFromJSON(schema({field("key1", utf8()), field("key2", int32()),
                                    field("value_sum", int64())}),
