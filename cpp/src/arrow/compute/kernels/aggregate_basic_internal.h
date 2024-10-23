@@ -26,6 +26,7 @@
 #include "arrow/compute/kernels/codegen_internal.h"
 #include "arrow/compute/kernels/common_internal.h"
 #include "arrow/compute/kernels/util_internal.h"
+#include "arrow/scalar.h"
 #include "arrow/type.h"
 #include "arrow/type_traits.h"
 #include "arrow/util/align_util.h"
@@ -227,6 +228,55 @@ struct MeanImpl<ArrowType, SimdLevel,
       const double mean = this->sum / this->count;
       out->value = std::make_shared<DoubleScalar>(mean);
     }
+    return Status::OK();
+  }
+
+  Status Finalize(KernelContext*, Datum* out) override { return FinalizeImpl(out); }
+};
+
+// MeanPartial Implementation
+template <typename ArrowType, SimdLevel::type SimdLevel, typename Enable = void>
+struct MeanPartialImpl;
+
+template <typename ArrowType, SimdLevel::type SimdLevel>
+struct MeanPartialImpl<ArrowType, SimdLevel, enable_if_decimal<ArrowType>>
+    : public SumImpl<ArrowType, SimdLevel> {
+  using SumImpl<ArrowType, SimdLevel>::SumImpl;
+  using SumImpl<ArrowType, SimdLevel>::options;
+  using SumCType = typename SumImpl<ArrowType, SimdLevel>::SumCType;
+  using OutputType = typename SumImpl<ArrowType, SimdLevel>::OutputType;
+
+  template <typename T = ArrowType>
+  Status FinalizeImpl(Datum* out) {
+    std::vector<std::shared_ptr<Scalar>> values = {
+        MakeScalar(float64(), this->sum).ValueOrDie(),
+        MakeScalar(int64(), this->count).ValueOrDie()};
+    out->value = StructScalar::Make(std::move(values), {"avg", "count"}).ValueOrDie();
+
+    return Status::OK();
+  }
+
+  Status Finalize(KernelContext*, Datum* out) override { return FinalizeImpl(out); }
+};
+
+template <typename ArrowType, SimdLevel::type SimdLevel>
+struct MeanPartialImpl<ArrowType, SimdLevel,
+                       std::enable_if_t<!is_decimal_type<ArrowType>::value>>
+    // Override the ResultType of SumImpl because we need to use double for intermediate
+    // sum to prevent integer overflows
+    : public SumImpl<ArrowType, SimdLevel, DoubleType> {
+  using SumImpl<ArrowType, SimdLevel, DoubleType>::SumImpl;
+  using SumImpl<ArrowType, SimdLevel, DoubleType>::options;
+
+  template <typename T = ArrowType>
+  Status FinalizeImpl(Datum* out) {
+    static_assert(std::is_same_v<decltype(this->sum), double>,
+                  "SumCType must be double for numeric inputs");
+    std::vector<std::shared_ptr<Scalar>> values = {
+        MakeScalar(float64(), this->sum).ValueOrDie(),
+        MakeScalar(int64(), this->count).ValueOrDie()};
+    out->value = StructScalar::Make(std::move(values), {"avg", "count"}).ValueOrDie();
+
     return Status::OK();
   }
 

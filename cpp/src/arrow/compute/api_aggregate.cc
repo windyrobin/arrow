@@ -193,6 +193,11 @@ Result<Datum> Mean(const Datum& value, const ScalarAggregateOptions& options,
   return CallFunction("mean", {value}, &options, ctx);
 }
 
+Result<Datum> MeanPartial(const Datum& value, const ScalarAggregateOptions& options,
+                          ExecContext* ctx) {
+  return CallFunction("mean_partial", {value}, &options, ctx);
+}
+
 Result<Datum> Product(const Datum& value, const ScalarAggregateOptions& options,
                       ExecContext* ctx) {
   return CallFunction("product", {value}, &options, ctx);

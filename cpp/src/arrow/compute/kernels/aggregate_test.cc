@@ -1419,6 +1419,17 @@ TEST(TestDecimalMeanKernel, SimpleMean) {
   }
 }
 
+TEST(TestDecimalMeanPartialKernel, SimpleMeanPartial) {
+  ScalarAggregateOptions options(/*skip_nulls=*/true, /*min_count=*/0);
+
+  // for (const auto& ty : {decimal128(3, 2), decimal256(3, 2)}) {
+  auto input_type = float64();
+  auto output_type = struct_({field("avg", input_type), field("count", int64())});
+  EXPECT_THAT(MeanPartial(ArrayFromJSON(input_type, R"([1, 2, 3])")),
+              ResultWith(ScalarFromJSON(output_type, R"({"avg": 6.0, "count": 3})")));
+  // }
+}
+
 TEST(TestDecimalMeanKernel, ScalarAggregateOptions) {
   for (const auto& ty : {decimal128(3, 2), decimal256(3, 2)}) {
     Datum result = ScalarFromJSON(ty, R"("3.03")");
