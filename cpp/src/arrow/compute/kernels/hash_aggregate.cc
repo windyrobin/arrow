@@ -228,27 +228,24 @@ void VisitGroupedValuesNonNull(const ExecSpan& batch, ConsumeValue&& valid_func)
                            [](uint32_t) {});
 }
 
-
-template <typename Arg0Type, typename Arg1Type, typename ConsumeValue, typename ConsumeNull>
+template <typename Arg0Type, typename Arg1Type, typename ConsumeValue,
+          typename ConsumeNull>
 typename arrow::internal::call_traits::enable_if_return<ConsumeValue, void>::type
 VisitGroupedTwoValues(const ExecSpan& batch, ConsumeValue&& valid_func,
-                   ConsumeNull&& null_func) {
+                      ConsumeNull&& null_func) {
   auto g = batch[1].array.GetValues<uint32_t>(1);
   if (batch[0].is_array()) {
     VisitTwoArrayValuesInline<Arg0Type, Arg1Type>(
-        batch[0].array.child_data[0],
-        batch[0].array.child_data[1],
-        [&](typename TypeTraits<Arg0Type>::CType f_val, \
+        batch[0].array.child_data[0], batch[0].array.child_data[1],
+        [&](typename TypeTraits<Arg0Type>::CType f_val,
             typename TypeTraits<Arg1Type>::CType s_val) {
-               valid_func(*g++, f_val, s_val); 
-            },
+          valid_func(*g++, f_val, s_val);
+        },
         [&]() { null_func(*g++); });
   } else {
-    //todo here
+    // todo here
   }
 }
-
-
 
 // ----------------------------------------------------------------------
 // Count implementation
@@ -857,7 +854,6 @@ static constexpr const char kMeanName[] = "mean";
 using GroupedMeanFactory =
     GroupedReducingFactory<GroupedMeanImpl, kMeanName, GroupedMeanNullImpl>;
 
-
 // ----------------------------------------------------------------------
 // Mean-partial implementation
 
@@ -906,7 +902,7 @@ struct GroupedMeanPartialImpl
                                                                           int64_t count) {
     return static_cast<MeanType>(reduced) / count;
   }
-  
+
   static Result<std::shared_ptr<Buffer>> Finish(MemoryPool* pool,
                                                 const ScalarAggregateOptions& options,
                                                 const int64_t* counts,
@@ -934,7 +930,6 @@ struct GroupedMeanPartialImpl
     }
     return values;
   }
-  
 
   Result<Datum> Finalize() override {
     std::shared_ptr<Buffer> null_bitmap = nullptr;
@@ -942,58 +937,56 @@ struct GroupedMeanPartialImpl
     int64_t null_count = 0;
 
     ARROW_ASSIGN_OR_RAISE(auto values,
-                          Finish(Base::pool_, Base::options_, counts, &(Base::reduced_), Base::num_groups_,
-                                       &null_count, &null_bitmap));
+                          Finish(Base::pool_, Base::options_, counts, &(Base::reduced_),
+                                 Base::num_groups_, &null_count, &null_bitmap));
 
     if (!Base::options_.skip_nulls) {
       null_count = kUnknownNullCount;
       if (null_bitmap) {
         arrow::internal::BitmapAnd(null_bitmap->data(), /*left_offset=*/0,
-                                   Base::no_nulls_.data(), /*right_offset=*/0, Base::num_groups_,
+                                   Base::no_nulls_.data(), /*right_offset=*/0,
+                                   Base::num_groups_,
                                    /*out_offset=*/0, null_bitmap->mutable_data());
       } else {
         ARROW_ASSIGN_OR_RAISE(null_bitmap, Base::no_nulls_.Finish());
       }
     }
 
-    auto means = ArrayData::Make(Base::out_type(), Base::num_groups_, {null_bitmap, nullptr});
-    auto counts_arr = ArrayData::Make(int64(), Base::num_groups_, {std::move(null_bitmap), nullptr});
-    
+    auto means =
+        ArrayData::Make(Base::out_type(), Base::num_groups_, {null_bitmap, nullptr});
+    auto counts_arr =
+        ArrayData::Make(int64(), Base::num_groups_, {std::move(null_bitmap), nullptr});
+
     means->buffers[1] = std::move(values);
     ARROW_ASSIGN_OR_RAISE(counts_arr->buffers[1], Base::counts_.Finish());
-
-
 
     return ArrayData::Make(out_type(), Base::num_groups_, {nullptr},
                            {std::move(means), std::move(counts_arr)});
   }
-  
+
   std::shared_ptr<DataType> out_type() const override {
     std::shared_ptr<DataType> avg_type = float64();
-    if (is_decimal_type<Type>::value) avg_type =  this->out_type_;
+    if (is_decimal_type<Type>::value) avg_type = this->out_type_;
 
     return struct_({field("avg", avg_type), field("count", int64())});
   }
-
-
 };
 
 struct GroupedMeanPartialNullImpl final : public GroupedNullImpl {
-  
-  std::shared_ptr<DataType> out_type() const override { 
-    return struct_({field("avg", float64()), field("count", int64())}); 
+  std::shared_ptr<DataType> out_type() const override {
+    return struct_({field("avg", float64()), field("count", int64())});
   }
 
   void output_empty(const std::shared_ptr<Buffer>& data) override {
-    //todo
+    // todo
     std::fill_n(data->mutable_data_as<double>(), num_groups_, 0);
   }
 };
 
 static constexpr const char kMeanPartialName[] = "mean-partial";
 using GroupedMeanPartialFactory =
-    GroupedReducingFactory<GroupedMeanPartialImpl, kMeanPartialName, GroupedMeanPartialNullImpl>;
-
+    GroupedReducingFactory<GroupedMeanPartialImpl, kMeanPartialName,
+                           GroupedMeanPartialNullImpl>;
 
 // ----------------------------------------------------------------------
 // Mean-final implementation
@@ -1022,12 +1015,10 @@ struct GroupedMeanFinalImpl : public GroupedAggregator {
     return Status::OK();
   }
 
-  static void Reduce(const DataType& out_type, AvgType& u, const AvgType& v, \
-      int64_t& u_count, const int64_t& v_count) {
-
+  static void Reduce(const DataType& out_type, AvgType& u, const AvgType& v,
+                     int64_t& u_count, const int64_t& v_count) {
     auto total_count = u_count + v_count;
-    u  = u * (u_count / total_count) + 
-        v * (v_count / total_count);
+    u = u * (u_count / total_count) + v * (v_count / total_count);
     u_count = total_count;
   }
 
@@ -1039,7 +1030,7 @@ struct GroupedMeanFinalImpl : public GroupedAggregator {
     VisitGroupedTwoValues<Type, Int64Type>(
         batch,
         [&](uint32_t g, const AvgType& value, const int64_t& count) {
-            Reduce(*out_type_, reduced[g], value, counts[g], count);
+          Reduce(*out_type_, reduced[g], value, counts[g], count);
         },
         [&](uint32_t g) { bit_util::SetBitTo(no_nulls, g, false); });
     return Status::OK();
@@ -1047,21 +1038,20 @@ struct GroupedMeanFinalImpl : public GroupedAggregator {
 
   Status Merge(GroupedAggregator&& raw_other,
                const ArrayData& group_id_mapping) override {
-    auto other =
-        checked_cast<GroupedMeanFinalImpl<Type>*>(&raw_other);
+    auto other = checked_cast<GroupedMeanFinalImpl<Type>*>(&raw_other);
 
     AvgType* reduced = reduced_.mutable_data();
     int64_t* counts = counts_.mutable_data();
     uint8_t* no_nulls = no_nulls_.mutable_data();
 
     const AvgType* other_reduced = other->reduced_.data();
-    const int64_t * other_counts = other->counts_.data();
+    const int64_t* other_counts = other->counts_.data();
     const uint8_t* other_no_nulls = other->no_nulls_.data();
 
     auto g = group_id_mapping.GetValues<uint32_t>(1);
     for (int64_t other_g = 0; other_g < group_id_mapping.length; ++other_g, ++g) {
-      Reduce(*out_type_, reduced[*g], other_reduced[other_g], \
-          counts[*g], other_counts[other_g]);
+      Reduce(*out_type_, reduced[*g], other_reduced[other_g], counts[*g],
+             other_counts[other_g]);
 
       bit_util::SetBitTo(
           no_nulls, *g,
@@ -1071,7 +1061,7 @@ struct GroupedMeanFinalImpl : public GroupedAggregator {
   }
 
   Result<Datum> Finalize() override {
-    //std::shared_ptr<Buffer> null_bitmap = nullptr;
+    // std::shared_ptr<Buffer> null_bitmap = nullptr;
 
     ARROW_ASSIGN_OR_RAISE(auto values, reduced_.Finish());
     ARROW_ASSIGN_OR_RAISE(auto null_bitmap, no_nulls_.Finish());
@@ -1082,11 +1072,9 @@ struct GroupedMeanFinalImpl : public GroupedAggregator {
 
   std::shared_ptr<DataType> out_type() const override { return out_type_; }
 
-
-  static std::shared_ptr<DataType> GetOutType(
-      const std::shared_ptr<DataType>& in_type) {
-      //fields [avg, count]
-      return in_type->field(0)->type();
+  static std::shared_ptr<DataType> GetOutType(const std::shared_ptr<DataType>& in_type) {
+    // fields [avg, count]
+    return in_type->field(0)->type();
   }
 
   int64_t num_groups_ = 0;
@@ -1098,17 +1086,16 @@ struct GroupedMeanFinalImpl : public GroupedAggregator {
   MemoryPool* pool_;
 };
 
-
 template <typename T>
 Result<std::unique_ptr<KernelState>> MeanFinalInit(KernelContext* ctx,
-                                                const KernelInitArgs& args) {
+                                                   const KernelInitArgs& args) {
   ARROW_ASSIGN_OR_RAISE(auto impl, HashAggregateInit<GroupedMeanFinalImpl<T>>(ctx, args));
-  //static_cast<GroupedMeanFinalImpl<T>*>(impl.get())->type_ = args.inputs[0].GetSharedPtr();
+  // static_cast<GroupedMeanFinalImpl<T>*>(impl.get())->type_ =
+  // args.inputs[0].GetSharedPtr();
   return impl;
 }
 
 struct GroupedMeanFinalFactory {
-
   Status Visit(const DoubleType&) {
     kernel = MakeKernel(std::move(argument_type), MeanFinalInit<DoubleType>);
     return Status::OK();
@@ -1126,7 +1113,7 @@ struct GroupedMeanFinalFactory {
 
   static Result<HashAggregateKernel> Make(const std::shared_ptr<DataType>& type) {
     GroupedMeanFinalFactory factory;
-    //factory.argument_type = type->id();
+    // factory.argument_type = type->id();
     factory.argument_type = struct_({field("avg", type), field("count", int64())});
     RETURN_NOT_OK(VisitTypeInline(*type, &factory));
     return std::move(factory.kernel);
@@ -1135,8 +1122,6 @@ struct GroupedMeanFinalFactory {
   HashAggregateKernel kernel;
   InputType argument_type;
 };
-
-
 
 // Variance/Stdev implementation
 
@@ -3834,13 +3819,16 @@ void RegisterHashAggregateBasic(FunctionRegistry* registry) {
 
   {
     auto func = std::make_shared<HashAggregateFunction>(
-        "hash_mean_partial", Arity::Binary(), hash_mean_partial_doc, &default_scalar_aggregate_options);
-    DCHECK_OK(AddHashAggKernels({boolean()}, GroupedMeanPartialFactory::Make, func.get()));
-    DCHECK_OK(AddHashAggKernels(SignedIntTypes(), GroupedMeanPartialFactory::Make, func.get()));
+        "hash_mean_partial", Arity::Binary(), hash_mean_partial_doc,
+        &default_scalar_aggregate_options);
     DCHECK_OK(
-        AddHashAggKernels(UnsignedIntTypes(), GroupedMeanPartialFactory::Make, func.get()));
+        AddHashAggKernels({boolean()}, GroupedMeanPartialFactory::Make, func.get()));
     DCHECK_OK(
-        AddHashAggKernels(FloatingPointTypes(), GroupedMeanPartialFactory::Make, func.get()));
+        AddHashAggKernels(SignedIntTypes(), GroupedMeanPartialFactory::Make, func.get()));
+    DCHECK_OK(AddHashAggKernels(UnsignedIntTypes(), GroupedMeanPartialFactory::Make,
+                                func.get()));
+    DCHECK_OK(AddHashAggKernels(FloatingPointTypes(), GroupedMeanPartialFactory::Make,
+                                func.get()));
     // Type parameters are ignored
     DCHECK_OK(AddHashAggKernels({decimal128(1, 1), decimal256(1, 1)},
                                 GroupedMeanPartialFactory::Make, func.get()));
@@ -3850,13 +3838,13 @@ void RegisterHashAggregateBasic(FunctionRegistry* registry) {
 
   {
     auto func = std::make_shared<HashAggregateFunction>(
-        "hash_mean_final", Arity::Binary(), hash_mean_final_doc, &default_scalar_aggregate_options);
-  
-    //for double type
-    DCHECK_OK(
-        AddHashAggKernels({float64()}, GroupedMeanFinalFactory::Make, func.get()));
+        "hash_mean_final", Arity::Binary(), hash_mean_final_doc,
+        &default_scalar_aggregate_options);
+
+    // for double type
+    DCHECK_OK(AddHashAggKernels({float64()}, GroupedMeanFinalFactory::Make, func.get()));
     // Type parameters are ignored
-    //DCHECK_OK(AddHashAggKernels({decimal128(1, 1), decimal256(1, 1)},
+    // DCHECK_OK(AddHashAggKernels({decimal128(1, 1), decimal256(1, 1)},
     //                            GroupedMeanFinalFactory::Make, func.get()));
     DCHECK_OK(registry->AddFunction(std::move(func)));
   }
