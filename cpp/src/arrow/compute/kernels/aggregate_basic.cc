@@ -308,7 +308,22 @@ struct MeanPartialImplDefault : public MeanPartialImpl<ArrowType, SimdLevel::NON
 
 Result<std::unique_ptr<KernelState>> MeanPartialInit(KernelContext* ctx,
                                                      const KernelInitArgs& args) {
-  MeanKernelInit<MeanPartialImplDefault> visitor(
+  MeanPartialKernelInit<MeanPartialImplDefault> visitor(
+      ctx, args.inputs[0].GetSharedPtr(),
+      static_cast<const ScalarAggregateOptions&>(*args.options));
+  return visitor.Create();
+}
+
+// ----------------------------------------------------------------------
+// MeanFinal implementation
+template <typename ArrowType>
+struct MeanFinalImplDefault : public MeanFinalImpl<ArrowType, SimdLevel::NONE> {
+  using MeanFinalImpl<ArrowType, SimdLevel::NONE>::MeanFinalImpl;
+};
+
+Result<std::unique_ptr<KernelState>> MeanFinalInit(KernelContext* ctx,
+                                                   const KernelInitArgs& args) {
+  MeanFinalKernelInit<MeanFinalImplDefault> visitor(
       ctx, args.inputs[0].GetSharedPtr(),
       static_cast<const ScalarAggregateOptions&>(*args.options));
   return visitor.Create();
@@ -982,6 +997,18 @@ const FunctionDoc mean_partial_doc{
     {"array"},
     "ScalarAggregateOptions"};
 
+const FunctionDoc mean_final_doc{
+    "Compute the mean of a numeric array (final)",
+    ("Null values are ignored by default. Minimum count of non-null\n"
+     "values can be set and null is returned if too few are present.\n"
+     "This can be changed through ScalarAggregateOptions.\n"
+     "The result is a double for integer and floating point arguments,\n"
+     "and a decimal with the same bit-width/precision/scale for decimal arguments.\n"
+     "For integers and floats, NaN is returned if min_count = 0 and\n"
+     "there are no values. For decimals, null is returned instead."),
+    {"array"},
+    "ScalarAggregateOptions"};
+
 const FunctionDoc first_last_doc{
     "Compute the first and last values of an array",
     ("Null values are ignored by default.\n"
@@ -1133,6 +1160,33 @@ void RegisterScalarAggregateBasic(FunctionRegistry* registry) {
   // func.get(),
   //              SimdLevel::NONE);
   // AddArrayScalarAggKernels(MeanPartialInit, {null()}, float64(), func.get());
+  //   // Add the SIMD variants for mean
+  // #if defined(ARROW_HAVE_RUNTIME_AVX2)
+  //   if (cpu_info->IsSupported(arrow::internal::CpuInfo::AVX2)) {
+  //     AddMeanAvx2AggKernels(func.get());
+  //   }
+  // #endif
+  // #if defined(ARROW_HAVE_RUNTIME_AVX512)
+  //   if (cpu_info->IsSupported(arrow::internal::CpuInfo::AVX512)) {
+  //     AddMeanAvx512AggKernels(func.get());
+  //   }
+  // #endif
+  DCHECK_OK(registry->AddFunction(std::move(func)));
+
+  // Add mean-final function
+  func = std::make_shared<ScalarAggregateFunction>(
+      "mean_final", Arity::Unary(), mean_final_doc, &default_scalar_aggregate_options);
+  auto input_type = struct_({field("avg", float64()), field("count", int64())});
+  // AddArrayScalarAggKernels(MeanFinalInit, {boolean()}, output_type, func.get());
+  // AddArrayScalarAggKernels(MeanFinalInit, NumericTypes(), float64(), func.get());
+  AddArrayScalarAggKernels(MeanFinalInit, {input_type}, float64(), func.get());
+  // AddAggKernel(KernelSignature::Make({Type::DECIMAL128}, FirstType), MeanFinalInit,
+  // func.get(),
+  //              SimdLevel::NONE);
+  // AddAggKernel(KernelSignature::Make({Type::DECIMAL256}, FirstType), MeanFinalInit,
+  // func.get(),
+  //              SimdLevel::NONE);
+  // AddArrayScalarAggKernels(MeanFinalInit, {null()}, float64(), func.get());
   //   // Add the SIMD variants for mean
   // #if defined(ARROW_HAVE_RUNTIME_AVX2)
   //   if (cpu_info->IsSupported(arrow::internal::CpuInfo::AVX2)) {

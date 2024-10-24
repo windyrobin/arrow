@@ -269,6 +269,21 @@ Result<Datum> MeanPartial(
     const ScalarAggregateOptions& options = ScalarAggregateOptions::Defaults(),
     ExecContext* ctx = NULLPTR);
 
+/// \brief Compute the mean of a numeric array.(final)
+///
+/// \param[in] value datum to compute the mean, expecting Array
+/// \param[in] options see ScalarAggregateOptions for more information
+/// \param[in] ctx the function execution context, optional
+/// \return datum of the computed mean as a DoubleScalar
+///
+/// \since 1.0.0
+/// \note API not yet finalized
+ARROW_EXPORT
+Result<Datum> MeanFinal(
+    const Datum& value,
+    const ScalarAggregateOptions& options = ScalarAggregateOptions::Defaults(),
+    ExecContext* ctx = NULLPTR);
+
 /// \brief Compute the product of values of a numeric array.
 ///
 /// \param[in] value datum to compute product of, expecting Array or ChunkedArray
