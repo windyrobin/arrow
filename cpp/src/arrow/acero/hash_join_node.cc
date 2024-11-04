@@ -102,7 +102,8 @@ Status HashJoinSchema::Init(JoinType join_type, const Schema& left_schema,
                             const std::string& left_field_name_suffix,
                             const std::string& right_field_name_suffix) {
   std::vector<FieldRef> left_output;
-  if (join_type != JoinType::RIGHT_SEMI && join_type != JoinType::RIGHT_ANTI) {
+  if (join_type != JoinType::RIGHT_SEMI && join_type != JoinType::RIGHT_ANTI &&
+      join_type != JoinType::RIGHT_SEMI_PROJECT) {
     const FieldVector& left_fields = left_schema.fields();
     left_output.resize(left_fields.size());
     for (size_t i = 0; i < left_fields.size(); ++i) {
@@ -111,7 +112,8 @@ Status HashJoinSchema::Init(JoinType join_type, const Schema& left_schema,
   }
   // Repeat the same for the right side
   std::vector<FieldRef> right_output;
-  if (join_type != JoinType::LEFT_SEMI && join_type != JoinType::LEFT_ANTI) {
+  if (join_type != JoinType::LEFT_SEMI && join_type != JoinType::LEFT_ANTI &&
+      join_type != JoinType::LEFT_SEMI_PROJECT) {
     const FieldVector& right_fields = right_schema.fields();
     right_output.resize(right_fields.size());
     for (size_t i = 0; i < right_fields.size(); ++i) {
@@ -259,14 +261,16 @@ Status HashJoinSchema::ValidateSchemas(JoinType join_type, const Schema& left_sc
   if (left_output.empty() && right_output.empty()) {
     return Status::Invalid("Join must output at least one field");
   }
-  if (join_type == JoinType::LEFT_SEMI || join_type == JoinType::LEFT_ANTI) {
+  if (join_type == JoinType::LEFT_SEMI || join_type == JoinType::LEFT_ANTI ||
+      join_type == JoinType::LEFT_SEMI_PROJECT) {
     if (!right_output.empty()) {
       return Status::Invalid(
           join_type == JoinType::LEFT_SEMI ? "Left semi join " : "Left anti-semi join ",
           "may not output fields from right side");
     }
   }
-  if (join_type == JoinType::RIGHT_SEMI || join_type == JoinType::RIGHT_ANTI) {
+  if (join_type == JoinType::RIGHT_SEMI || join_type == JoinType::RIGHT_ANTI ||
+      join_type == JoinType::RIGHT_SEMI_PROJECT) {
     if (!left_output.empty()) {
       return Status::Invalid(join_type == JoinType::RIGHT_SEMI ? "Right semi join "
                                                                : "Right anti-semi join ",
@@ -288,11 +292,13 @@ Status HashJoinSchema::ValidateSchemas(JoinType join_type, const Schema& left_sc
 }
 
 std::shared_ptr<Schema> HashJoinSchema::MakeOutputSchema(
-    const std::string& left_field_name_suffix,
-    const std::string& right_field_name_suffix) {
+    const std::string& left_field_name_suffix, const std::string& right_field_name_suffix,
+    const std::string& extent_field) {
   std::vector<std::shared_ptr<Field>> fields;
   int left_size = proj_maps[0].num_cols(HashJoinProjection::OUTPUT);
   int right_size = proj_maps[1].num_cols(HashJoinProjection::OUTPUT);
+  extent_field.empty() ? fields.resize(left_size + right_size)
+                       : fields.resize(left_size + right_size + 1);
   fields.resize(left_size + right_size);
 
   std::unordered_multimap<std::string, int> left_field_map;
@@ -342,6 +348,10 @@ std::shared_ptr<Schema> HashJoinSchema::MakeOutputSchema(
       fields[left_size + i] =
           std::make_shared<Field>(input_field_name, input_data_type, true /*nullable*/);
     }
+  }
+  if (!extent_field.empty()) {
+    fields[left_size + right_size] =
+        std::make_shared<Field>(extent_field, boolean(), true);
   }
   return std::make_shared<Schema>(std::move(fields));
 }
@@ -744,7 +754,8 @@ class HashJoinNode : public ExecNode, public TracedNode {
 
     // Generate output schema
     std::shared_ptr<Schema> output_schema = schema_mgr->MakeOutputSchema(
-        join_options.output_suffix_for_left, join_options.output_suffix_for_right);
+        join_options.output_suffix_for_left, join_options.output_suffix_for_right,
+        join_options.semi_extent_field);
 
     // Create hash join implementation object
     // SwissJoin does not support:

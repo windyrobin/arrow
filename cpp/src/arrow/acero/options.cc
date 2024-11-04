@@ -45,6 +45,10 @@ std::string ToString(JoinType t) {
       return "RIGHT_OUTER";
     case JoinType::FULL_OUTER:
       return "FULL_OUTER";
+    case JoinType::LEFT_SEMI_PROJECT:
+      return "LEFT_SEMI_PROJECT";
+    case JoinType::RIGHT_SEMI_PROJECT:
+      return "RIGHT_SEMI_PROJECT";
   }
   ARROW_LOG(FATAL) << "Invalid variant of arrow::compute::JoinType";
   std::abort();
