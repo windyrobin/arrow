@@ -2820,7 +2820,7 @@ class SwissJoin : public HashJoinImpl {
                                          : key_id);
         uint32_t num_payloads_for_key = last_payload_for_key - first_payload_for_key + 1;
         uint32_t num_payloads_match = 0;
-        uint32_t num_payload_unmatch = 0;
+        uint32_t num_payloads_unmatch = 0;
         for (uint32_t i = 0; i < num_payloads_for_key; ++i) {
           uint32_t payload = first_payload_for_key + i;
           if (bit_util::GetBit(hash_table_.has_match(), payload) == bit_to_output) {
@@ -2832,16 +2832,17 @@ class SwissJoin : public HashJoinImpl {
           } else {
             if (join_type_ == JoinType::RIGHT_SEMI_PROJECT) {
               unmatch_key_ids_buf
-                  .mutable_data()[num_unmatch_output_rows + num_payload_unmatch] = key_id;
+                  .mutable_data()[num_unmatch_output_rows + num_payloads_unmatch] =
+                  key_id;
               unmatch_payload_ids_buf
-                  .mutable_data()[num_unmatch_output_rows + num_payload_unmatch] =
+                  .mutable_data()[num_unmatch_output_rows + num_payloads_unmatch] =
                   payload;
-              num_payload_unmatch++;
+              num_payloads_unmatch++;
             }
           }
         }
         num_match_output_rows += num_payloads_match;
-        num_unmatch_output_rows += num_payload_unmatch;
+        num_unmatch_output_rows += num_payloads_unmatch;
       }
       Status status = Status::OK();
       if (join_type_ == JoinType::RIGHT_SEMI_PROJECT) {

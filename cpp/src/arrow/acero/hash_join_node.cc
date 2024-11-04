@@ -299,7 +299,6 @@ std::shared_ptr<Schema> HashJoinSchema::MakeOutputSchema(
   int right_size = proj_maps[1].num_cols(HashJoinProjection::OUTPUT);
   extent_field.empty() ? fields.resize(left_size + right_size)
                        : fields.resize(left_size + right_size + 1);
-  fields.resize(left_size + right_size);
 
   std::unordered_multimap<std::string, int> left_field_map;
   left_field_map.reserve(left_size);
@@ -1186,9 +1185,9 @@ std::pair<HashJoinNode*, std::vector<int>> BloomFilterPushdownContext::GetPushdo
   // filter would only allow us to early-output. Left Antijoin outputs only if there is
   // no match, so again early output. We don't implement early output for now, so we
   // must disallow these types of joins.
-  bool bloom_filter_does_not_apply_to_join = join_type == JoinType::LEFT_ANTI ||
-                                             join_type == JoinType::LEFT_OUTER ||
-                                             join_type == JoinType::FULL_OUTER;
+  bool bloom_filter_does_not_apply_to_join =
+      join_type == JoinType::LEFT_ANTI || join_type == JoinType::LEFT_OUTER ||
+      join_type == JoinType::FULL_OUTER || join_type == JoinType::LEFT_SEMI_PROJECT;
   disable_bloom_filter_ = disable_bloom_filter_ || bloom_filter_does_not_apply_to_join;
 
   // Bloom filter currently doesn't support dictionaries.
