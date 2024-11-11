@@ -22,6 +22,7 @@
 #include "arrow/acero/partition_util.h"
 #include "arrow/acero/schema_util.h"
 #include "arrow/acero/task_util.h"
+#include "arrow/array/builder_primitive.h"
 #include "arrow/compute/kernels/row_encoder_internal.h"
 #include "arrow/compute/key_map_internal.h"
 #include "arrow/compute/light_array_internal.h"
@@ -582,6 +583,36 @@ class JoinResultMaterialize {
     return Status::OK();
   }
 
+  template <bool ext_val, class APPEND_ROWS_FN, class OUTPUT_BATCH_FN>
+  Status AppendSemiProjectAndOutput(int num_rows_to_append,
+                                    const APPEND_ROWS_FN& append_rows_fn,
+                                    const OUTPUT_BATCH_FN& output_batch_fn) {
+    int offset = 0;
+    while (num_rows_to_append > 0) {
+      int num_rows_appended = 0;
+      ARROW_RETURN_NOT_OK(append_rows_fn(num_rows_to_append, offset, &num_rows_appended));
+      if (num_rows_appended <= 0) {
+        break;
+      }
+      if (num_rows_appended <= num_rows_to_append) {
+        ExecBatch batch;
+        ARROW_RETURN_NOT_OK(Flush(&batch));
+        std::shared_ptr<arrow::Array> col_array;
+        std::shared_ptr<arrow::BooleanBuilder> builder =
+            std::make_shared<arrow::BooleanBuilder>(pool_);
+        ARROW_RETURN_NOT_OK(builder->Reserve(batch.length));
+        ARROW_RETURN_NOT_OK(
+            builder->AppendValues(std::vector<bool>(batch.length, ext_val)));
+        ARROW_RETURN_NOT_OK(builder->Finish(&col_array));
+        batch.values.emplace_back(std::move(col_array));
+        ARROW_RETURN_NOT_OK(output_batch_fn(std::move(batch)));
+        num_rows_to_append -= num_rows_appended;
+        offset += num_rows_appended;
+      }
+    }
+    return Status::OK();
+  }
+
   template <class OUTPUT_BATCH_FN>
   Status AppendProbeOnly(const ExecBatch& key_and_payload, int num_rows_to_append,
                          const uint16_t* row_ids, OUTPUT_BATCH_FN output_batch_fn) {
@@ -618,6 +649,52 @@ class JoinResultMaterialize {
                         row_ids ? row_ids + offset : NULLPTR,
                         key_ids ? key_ids + offset : NULLPTR,
                         payload_ids ? payload_ids + offset : NULLPTR, num_rows_appended);
+        },
+        output_batch_fn);
+  }
+
+  template <class OUTPUT_BATCH_FN>
+  Status AppendSemiProjectProbeOnly(const ExecBatch& key_and_payload,
+                                    int num_rows_to_append, const uint16_t* row_ids,
+                                    OUTPUT_BATCH_FN output_batch_fn) {
+    ExecBatch out({}, key_and_payload.length);
+    for (const auto& value : key_and_payload.values) {
+      out.values.emplace_back(std::move(value));
+    }
+    std::shared_ptr<arrow::Array> col_array;
+    std::shared_ptr<arrow::BooleanBuilder> builder =
+        std::make_shared<arrow::BooleanBuilder>(pool_);
+    RETURN_NOT_OK(builder->Reserve(out.length));
+    auto cur = 0;
+    for (int i = 0; i < num_rows_to_append; ++i) {
+      auto row_id = row_ids[i];
+      if (cur < row_id) {
+        RETURN_NOT_OK(builder->AppendValues(std::vector<bool>(row_id - cur, false)));
+        cur = row_id;
+      }
+      RETURN_NOT_OK(builder->Append(true));
+      cur++;
+    }
+    if (cur < out.length) {
+      RETURN_NOT_OK(builder->AppendValues(std::vector<bool>(out.length - cur, false)));
+    }
+    RETURN_NOT_OK(builder->Finish(&col_array));
+    out.values.emplace_back(std::move(col_array));
+    ARROW_RETURN_NOT_OK(output_batch_fn(std::move(out)));
+    num_produced_batches_++;
+    return Status::OK();
+  }
+
+  template <bool ext_val, class OUTPUT_BATCH_FN>
+  Status AppendSemiProjectBuildOnly(int num_rows_to_append, const uint32_t* key_ids,
+                                    const uint32_t* payload_ids,
+                                    OUTPUT_BATCH_FN output_batch_fn) {
+    return AppendSemiProjectAndOutput<ext_val>(
+        num_rows_to_append,
+        [&](int num_rows_to_append_left, int offset, int* num_rows_appended) {
+          return AppendBuildOnly(
+              num_rows_to_append_left, key_ids ? key_ids + offset : NULLPTR,
+              payload_ids ? payload_ids + offset : NULLPTR, num_rows_appended);
         },
         output_batch_fn);
   }

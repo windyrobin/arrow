@@ -2340,9 +2340,12 @@ Status JoinProbeProcessor::OnNextBatch(int64_t thread_id,
     // Semi-joins
     //
     if (join_type_ == JoinType::LEFT_SEMI || join_type_ == JoinType::LEFT_ANTI ||
-        join_type_ == JoinType::RIGHT_SEMI || join_type_ == JoinType::RIGHT_ANTI) {
+        join_type_ == JoinType::RIGHT_SEMI || join_type_ == JoinType::RIGHT_ANTI ||
+        join_type_ == JoinType::LEFT_SEMI_PROJECT ||
+        join_type_ == JoinType::RIGHT_SEMI_PROJECT) {
       int num_passing_ids = 0;
-      if (join_type_ == JoinType::LEFT_SEMI) {
+      if (join_type_ == JoinType::LEFT_SEMI ||
+          join_type_ == JoinType::LEFT_SEMI_PROJECT) {
         RETURN_NOT_OK(residual_filter_->FilterLeftSemi(
             keypayload_batch, minibatch_start, minibatch_size_next,
             match_bitvector_buf.mutable_data(), key_ids_buf.mutable_data(),
@@ -2366,6 +2369,12 @@ Status JoinProbeProcessor::OnNextBatch(int64_t thread_id,
         // row ids.
         //
         RETURN_NOT_OK(materialize_[thread_id]->AppendProbeOnly(
+            keypayload_batch, num_passing_ids, materialize_batch_ids_buf.mutable_data(),
+            [&](ExecBatch batch) {
+              return output_batch_fn_(thread_id, std::move(batch));
+            }));
+      } else if (join_type_ == JoinType::LEFT_SEMI_PROJECT) {
+        RETURN_NOT_OK(materialize_[thread_id]->AppendSemiProjectProbeOnly(
             keypayload_batch, num_passing_ids, materialize_batch_ids_buf.mutable_data(),
             [&](ExecBatch batch) {
               return output_batch_fn_(thread_id, std::move(batch));
@@ -2417,7 +2426,6 @@ Status JoinProbeProcessor::OnNextBatch(int64_t thread_id,
           hash_table_->UpdateHasMatchForPayloads(thread_id, num_matches_next,
                                                  materialize_payload_ids);
         }
-
         // Call materialize for resulting id tuples pointing to matching pairs
         // of rows.
         //
@@ -2745,7 +2753,8 @@ class SwissJoin : public HashJoinImpl {
 
     bool need_to_scan =
         (join_type_ == JoinType::RIGHT_SEMI || join_type_ == JoinType::RIGHT_ANTI ||
-         join_type_ == JoinType::RIGHT_OUTER || join_type_ == JoinType::FULL_OUTER);
+         join_type_ == JoinType::RIGHT_OUTER || join_type_ == JoinType::FULL_OUTER ||
+         join_type_ == JoinType::RIGHT_SEMI_PROJECT);
 
     if (need_to_scan) {
       hash_table_.MergeHasMatch();
@@ -2764,7 +2773,8 @@ class SwissJoin : public HashJoinImpl {
 
     // Should we output matches or non-matches?
     //
-    bool bit_to_output = (join_type_ == JoinType::RIGHT_SEMI);
+    bool bit_to_output = (join_type_ == JoinType::RIGHT_SEMI) ||
+                         (join_type_ == JoinType::RIGHT_SEMI_PROJECT);
 
     int64_t start_row = task_id * kNumRowsPerScanTask;
     int64_t end_row =
@@ -2777,7 +2787,11 @@ class SwissJoin : public HashJoinImpl {
     //
     auto payload_ids_buf = arrow::util::TempVectorHolder<uint32_t>(
         temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
+    auto unmatch_payload_ids_buf = arrow::util::TempVectorHolder<uint32_t>(
+        temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
     auto key_ids_buf = arrow::util::TempVectorHolder<uint32_t>(
+        temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
+    auto unmatch_key_ids_buf = arrow::util::TempVectorHolder<uint32_t>(
         temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
     auto selection_buf = arrow::util::TempVectorHolder<uint16_t>(
         temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
@@ -2794,7 +2808,8 @@ class SwissJoin : public HashJoinImpl {
           hash_table_.payload_id_to_key_id(static_cast<uint32_t>(mini_batch_start));
       uint32_t last_key_id = hash_table_.payload_id_to_key_id(
           static_cast<uint32_t>(mini_batch_start + mini_batch_size_next - 1));
-      int num_output_rows = 0;
+      int num_match_output_rows = 0;
+      int num_unmatch_output_rows = 0;
       for (uint32_t key_id = first_key_id; key_id <= last_key_id; ++key_id) {
         uint32_t first_payload_for_key = std::max(
             static_cast<uint32_t>(mini_batch_start),
@@ -2805,32 +2820,59 @@ class SwissJoin : public HashJoinImpl {
                                          : key_id);
         uint32_t num_payloads_for_key = last_payload_for_key - first_payload_for_key + 1;
         uint32_t num_payloads_match = 0;
+        uint32_t num_payloads_unmatch = 0;
         for (uint32_t i = 0; i < num_payloads_for_key; ++i) {
           uint32_t payload = first_payload_for_key + i;
           if (bit_util::GetBit(hash_table_.has_match(), payload) == bit_to_output) {
-            key_ids_buf.mutable_data()[num_output_rows + num_payloads_match] = key_id;
-            payload_ids_buf.mutable_data()[num_output_rows + num_payloads_match] =
+            key_ids_buf.mutable_data()[num_match_output_rows + num_payloads_match] =
+                key_id;
+            payload_ids_buf.mutable_data()[num_match_output_rows + num_payloads_match] =
                 payload;
             num_payloads_match++;
+          } else {
+            if (join_type_ == JoinType::RIGHT_SEMI_PROJECT) {
+              unmatch_key_ids_buf
+                  .mutable_data()[num_unmatch_output_rows + num_payloads_unmatch] =
+                  key_id;
+              unmatch_payload_ids_buf
+                  .mutable_data()[num_unmatch_output_rows + num_payloads_unmatch] =
+                  payload;
+              num_payloads_unmatch++;
+            }
           }
         }
-        num_output_rows += num_payloads_match;
+        num_match_output_rows += num_payloads_match;
+        num_unmatch_output_rows += num_payloads_unmatch;
       }
-
-      if (num_output_rows > 0) {
-        // Materialize (and output whenever buffers get full) hash table
-        // values according to the generated list of ids.
-        //
-        Status status = local_states_[thread_id].materialize.AppendBuildOnly(
-            num_output_rows, key_ids_buf.mutable_data(), payload_ids_buf.mutable_data(),
-            [&](ExecBatch batch) {
+      Status status = Status::OK();
+      if (join_type_ == JoinType::RIGHT_SEMI_PROJECT) {
+        if (num_match_output_rows > 0) {
+          status = local_states_[thread_id].materialize.AppendSemiProjectBuildOnly<true>(
+              num_match_output_rows, key_ids_buf.mutable_data(),
+              payload_ids_buf.mutable_data(), [&](ExecBatch batch) {
+                return output_batch_callback_(static_cast<int64_t>(thread_id),
+                                              std::move(batch));
+              });
+        }
+        if (num_unmatch_output_rows > 0) {
+          status = local_states_[thread_id].materialize.AppendSemiProjectBuildOnly<false>(
+              num_unmatch_output_rows, unmatch_key_ids_buf.mutable_data(),
+              unmatch_payload_ids_buf.mutable_data(), [&](ExecBatch batch) {
+                return output_batch_callback_(static_cast<int64_t>(thread_id),
+                                              std::move(batch));
+              });
+        }
+      } else if (num_match_output_rows > 0) {
+        status = local_states_[thread_id].materialize.AppendBuildOnly(
+            num_match_output_rows, key_ids_buf.mutable_data(),
+            payload_ids_buf.mutable_data(), [&](ExecBatch batch) {
               return output_batch_callback_(static_cast<int64_t>(thread_id),
                                             std::move(batch));
             });
-        RETURN_NOT_OK(CancelIfNotOK(status));
-        if (!status.ok()) {
-          break;
-        }
+      }
+      RETURN_NOT_OK(CancelIfNotOK(status));
+      if (!status.ok()) {
+        break;
       }
       mini_batch_start += mini_batch_size_next;
     }

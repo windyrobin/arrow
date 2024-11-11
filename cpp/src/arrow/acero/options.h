@@ -544,7 +544,9 @@ class ARROW_ACERO_EXPORT OrderByNodeOptions : public ExecNodeOptions {
 
 enum class JoinType {
   LEFT_SEMI,
+  LEFT_SEMI_PROJECT,
   RIGHT_SEMI,
+  RIGHT_SEMI_PROJECT,
   LEFT_ANTI,
   RIGHT_ANTI,
   INNER,
@@ -568,7 +570,7 @@ class ARROW_ACERO_EXPORT HashJoinNodeOptions : public ExecNodeOptions {
       std::vector<FieldRef> in_right_keys, Expression filter = literal(true),
       std::string output_suffix_for_left = default_output_suffix_for_left,
       std::string output_suffix_for_right = default_output_suffix_for_right,
-      bool disable_bloom_filter = false)
+      bool disable_bloom_filter = false, std::string semi_extent_field = "")
       : join_type(in_join_type),
         left_keys(std::move(in_left_keys)),
         right_keys(std::move(in_right_keys)),
@@ -580,6 +582,10 @@ class ARROW_ACERO_EXPORT HashJoinNodeOptions : public ExecNodeOptions {
     this->key_cmp.resize(this->left_keys.size());
     for (size_t i = 0; i < this->left_keys.size(); ++i) {
       this->key_cmp[i] = JoinKeyCmp::EQ;
+    }
+    if (in_join_type == JoinType::RIGHT_SEMI_PROJECT ||
+        in_join_type == JoinType::LEFT_SEMI_PROJECT) {
+      this->semi_extent_field = std::move(semi_extent_field);
     }
   }
   /// \brief create an instance from keys
@@ -677,6 +683,7 @@ class ARROW_ACERO_EXPORT HashJoinNodeOptions : public ExecNodeOptions {
   Expression filter = literal(true);
   // whether or not to disable Bloom filters in this join
   bool disable_bloom_filter = false;
+  std::string semi_extent_field = "";
 };
 
 /// \brief a node which implements the asof join operation
