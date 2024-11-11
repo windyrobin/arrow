@@ -205,6 +205,7 @@ struct SourceNode : ExecNode, public TracedNode {
             if (IsIterationEnd(morsel_or_end) || stop_requested_) {
               return Break(batch_count_);
             }
+            // ARROW_LOG(INFO) << "morsel_or_end:\n" << morsel_or_end->ToString();
             lock.unlock();
             SliceAndDeliverMorsel(*morsel_or_end);
             lock.lock();

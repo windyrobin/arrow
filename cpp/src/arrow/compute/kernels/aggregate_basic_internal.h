@@ -26,6 +26,7 @@
 #include "arrow/compute/kernels/codegen_internal.h"
 #include "arrow/compute/kernels/common_internal.h"
 #include "arrow/compute/kernels/util_internal.h"
+#include "arrow/scalar.h"
 #include "arrow/type.h"
 #include "arrow/type_traits.h"
 #include "arrow/util/align_util.h"
@@ -233,6 +234,138 @@ struct MeanImpl<ArrowType, SimdLevel,
   Status Finalize(KernelContext*, Datum* out) override { return FinalizeImpl(out); }
 };
 
+// MeanPartial Implementation
+template <typename ArrowType, SimdLevel::type SimdLevel, typename Enable = void>
+struct MeanPartialImpl;
+
+template <typename ArrowType, SimdLevel::type SimdLevel>
+struct MeanPartialImpl<ArrowType, SimdLevel, enable_if_decimal<ArrowType>>
+    : public SumImpl<ArrowType, SimdLevel> {
+  using SumImpl<ArrowType, SimdLevel>::SumImpl;
+  using SumImpl<ArrowType, SimdLevel>::options;
+  using SumCType = typename SumImpl<ArrowType, SimdLevel>::SumCType;
+  using OutputType = typename SumImpl<ArrowType, SimdLevel>::OutputType;
+
+  template <typename T = ArrowType>
+  Status FinalizeImpl(Datum* out) {
+    std::vector<std::shared_ptr<Scalar>> values = {
+        MakeScalar(float64(), this->sum).ValueOrDie(),
+        MakeScalar(int64(), this->count).ValueOrDie()};
+    out->value = StructScalar::Make(std::move(values), {"avg", "count"}).ValueOrDie();
+
+    return Status::OK();
+  }
+
+  Status Finalize(KernelContext*, Datum* out) override { return FinalizeImpl(out); }
+};
+
+template <typename ArrowType, SimdLevel::type SimdLevel>
+struct MeanPartialImpl<ArrowType, SimdLevel,
+                       std::enable_if_t<!is_decimal_type<ArrowType>::value>>
+    // Override the ResultType of SumImpl because we need to use double for intermediate
+    // sum to prevent integer overflows
+    : public SumImpl<ArrowType, SimdLevel, DoubleType> {
+  using SumImpl<ArrowType, SimdLevel, DoubleType>::SumImpl;
+  using SumImpl<ArrowType, SimdLevel, DoubleType>::options;
+
+  template <typename T = ArrowType>
+  Status FinalizeImpl(Datum* out) {
+    static_assert(std::is_same_v<decltype(this->sum), double>,
+                  "SumCType must be double for numeric inputs");
+    std::vector<std::shared_ptr<Scalar>> values = {
+        MakeScalar(float64(), this->sum).ValueOrDie(),
+        MakeScalar(int64(), this->count).ValueOrDie()};
+    out->value = StructScalar::Make(std::move(values), {"avg", "count"}).ValueOrDie();
+
+    return Status::OK();
+  }
+
+  Status Finalize(KernelContext*, Datum* out) override { return FinalizeImpl(out); }
+};
+
+// MeanFinal Implementation
+template <typename ArrowType, SimdLevel::type SimdLevel, typename Enable = void>
+struct MeanFinalImpl;
+
+template <typename ArrowType, SimdLevel::type SimdLevel>
+struct MeanFinalImpl<ArrowType, SimdLevel, enable_if_decimal<ArrowType>>
+    : public SumImpl<ArrowType, SimdLevel> {
+  using SumImpl<ArrowType, SimdLevel>::SumImpl;
+  using SumImpl<ArrowType, SimdLevel>::options;
+  using SumCType = typename SumImpl<ArrowType, SimdLevel>::SumCType;
+  using OutputType = typename SumImpl<ArrowType, SimdLevel>::OutputType;
+
+  template <typename T = ArrowType>
+  Status FinalizeImpl(Datum* out) {
+    return Status::Invalid("Not supported");
+  }
+
+  Status Consume(KernelContext*, const ExecSpan& batch) override {
+    return Status::Invalid("Not supported");
+  }
+
+  Status MergeFrom(KernelContext*, KernelState&& src) override {
+    return Status::Invalid("Not supported");
+  }
+
+  Status Finalize(KernelContext*, Datum* out) override { return FinalizeImpl(out); }
+};
+
+template <typename ArrowType, SimdLevel::type SimdLevel>
+struct MeanFinalImpl<ArrowType, SimdLevel,
+                     std::enable_if_t<!is_decimal_type<ArrowType>::value>>
+    // Override the ResultType of SumImpl because we need to use double for intermediate
+    // sum to prevent integer overflows
+    : public SumImpl<ArrowType, SimdLevel, DoubleType> {
+  using ThisType = MeanFinalImpl<ArrowType, SimdLevel>;
+  using SumImpl<ArrowType, SimdLevel, DoubleType>::SumImpl;
+  using SumImpl<ArrowType, SimdLevel, DoubleType>::options;
+
+  template <typename T = ArrowType>
+  Status FinalizeImpl(Datum* out) {
+    static_assert(std::is_same_v<decltype(this->sum), double>,
+                  "SumCType must be double for numeric inputs");
+
+    out->value = std::make_shared<DoubleScalar>(this->sum / this->count);
+    return Status::OK();
+  }
+
+  Status Consume(KernelContext*, const ExecSpan& batch) override {
+    if (batch[0].is_array()) {
+      const ArraySpan& data = batch[0].array;
+      auto array = data.ToArray();
+      auto struct_array = std::static_pointer_cast<arrow::StructArray>(array);
+
+      // avg
+      auto child_0 = struct_array->field(0);
+      auto double_array = std::static_pointer_cast<arrow::DoubleArray>(child_0);
+      for (int64_t i = 0; i < double_array->length(); ++i) {
+        this->sum += double_array->Value(i);
+      }
+
+      // count
+      auto child_1 = struct_array->field(1);
+      auto int64_array = std::static_pointer_cast<arrow::Int64Array>(child_1);
+      for (int64_t i = 0; i < int64_array->length(); ++i) {
+        this->count += int64_array->Value(i);
+      }
+    } else {
+      return Status::Invalid("Not supported");
+    }
+    return Status::OK();
+  }
+
+  Status MergeFrom(KernelContext*, KernelState&& src) override {
+    const auto& other = checked_cast<const ThisType&>(src);
+    this->count += other.count;
+    this->sum += other.sum;
+    this->nulls_observed = this->nulls_observed || other.nulls_observed;
+    return Status::OK();
+  }
+
+  Status Finalize(KernelContext*, Datum* out) override { return FinalizeImpl(out); }
+};
+
 template <template <typename> class KernelClass>
 struct SumLikeInit {
   std::unique_ptr<KernelState> state;
@@ -244,7 +377,9 @@ struct SumLikeInit {
               const ScalarAggregateOptions& options)
       : ctx(ctx), type(type), options(options) {}
 
-  Status Visit(const DataType&) { return Status::NotImplemented("No sum implemented"); }
+  virtual Status Visit(const DataType&) {
+    return Status::NotImplemented("No sum implemented");
+  }
 
   Status Visit(const HalfFloatType&) {
     return Status::NotImplemented("No sum implemented");
@@ -288,6 +423,31 @@ struct MeanKernelInit : public SumLikeInit<KernelClass> {
 
   Status Visit(const NullType&) override {
     this->state.reset(new NullSumImpl<DoubleType>(this->options));
+    return Status::OK();
+  }
+};
+
+template <template <typename> class KernelClass>
+struct MeanPartialKernelInit : public SumLikeInit<KernelClass> {
+  MeanPartialKernelInit(KernelContext* ctx, std::shared_ptr<DataType> type,
+                        const ScalarAggregateOptions& options)
+      : SumLikeInit<KernelClass>(ctx, type, options) {}
+
+  Status Visit(const NullType&) override {
+    this->state.reset(new NullSumImpl<DoubleType>(this->options));
+    return Status::OK();
+  }
+};
+
+template <template <typename> class KernelClass>
+struct MeanFinalKernelInit : public SumLikeInit<KernelClass> {
+  MeanFinalKernelInit(KernelContext* ctx, std::shared_ptr<DataType> type,
+                      const ScalarAggregateOptions& options)
+      : SumLikeInit<KernelClass>(ctx, type, options) {}
+
+  Status Visit(const DataType&) override {
+    this->state.reset(
+        new MeanFinalImpl<DoubleType, SimdLevel::NONE>(float64(), this->options));
     return Status::OK();
   }
 };
